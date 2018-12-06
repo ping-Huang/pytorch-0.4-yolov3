@@ -154,10 +154,10 @@ def main():
                 nsamples = train(epoch)
                 if epoch % save_interval == 0:
                     savemodel(epoch, nsamples)
-                if not no_eval and epoch >= test_interval and (epoch%test_interval) == 0:
-                    print('>> intermittent evaluating ...')
-                    fscore = test(epoch)
-                    print('>> done evaluation.')
+                #if not no_eval and epoch >= test_interval and (epoch%test_interval) == 0:
+                    #print('>> intermittent evaluating ...')
+                fscore = test(epoch)
+                    #print('>> done evaluation.')
                 if FLAGS.localmax and fscore > mfscore:
                     mfscore = fscore
                     savemodel(epoch, nsamples, True)
