@@ -15,6 +15,16 @@ from cfg import parse_cfg
 from darknet import Darknet
 import argparse
 
+script_dir = os.path.dirname(__file__)
+module_path = os.path.abspath(os.path.join(script_dir, '..'))
+try:
+    import distiller
+except ImportError:
+    sys.path.append(module_path)
+    import distiller
+import apputils
+from distiller.data_loggers import TensorBoardLogger, PythonLogger
+
 FLAGS = None
 unparsed = None
 device = None
@@ -136,7 +146,15 @@ def main():
     optimizer = optim.SGD(model.parameters(), 
                         lr=learning_rate/batch_size, momentum=momentum, 
                         dampening=0, weight_decay=decay*batch_size)
-
+    
+    if args.compress is not None:
+        pruner = distiller.pruning.SparsityLevelParameterPruner(name='sensitivity', levels=sparsity_levels)
+        policy = distiller.PruningPolicy(pruner, pruner_args=None)
+        compression_scheduler = distiller.CompressionScheduler(model)
+        compression_scheduler.add_policy(policy, starting_epoch=0, ending_epoch=args.epochs, frequency=1)
+        #lrpolicy = distiller.LRPolicy(torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1))
+        #compression_scheduler.add_policy(lrpolicy, starting_epoch=0, ending_epoch=90, frequency=1)
+    
     if evaluate:
         logging('evaluating ...')
         test(0)
@@ -151,6 +169,9 @@ def main():
             else:
                 mfscore = 0.5
             for epoch in range(init_epoch+1, max_epochs+1):
+                
+                if args.compress is not None:
+                    compression_scheduler.on_epoch_begin(epoch)
                 nsamples = train(epoch)
                 if epoch % save_interval == 0:
                     savemodel(epoch, nsamples)
@@ -158,6 +179,9 @@ def main():
                     #print('>> intermittent evaluating ...')
                 fscore = test(epoch)
                     #print('>> done evaluation.')
+                if args.compress is not None:
+                    compression_scheduler.on_epoch_end(epoch, optimizer)
+                    
                 if FLAGS.localmax and fscore > mfscore:
                     mfscore = fscore
                     savemodel(epoch, nsamples, True)
@@ -219,6 +243,9 @@ def train(epoch):
         processed_batches = processed_batches + 1
         #if (batch_idx+1) % dot_interval == 0:
         #    sys.stdout.write('.')
+        
+        if compression_scheduler:
+            compression_scheduler.on_minibatch_begin(epoch, batch_idx, processed_batches, optimizer)
 
         t3 = time.time()
         data, target = data.to(device), target.to(device)
@@ -241,6 +268,9 @@ def train(epoch):
         #for i, l in enumerate(reversed(org_loss)):
         #    l.backward(retain_graph=True if i < len(org_loss)-1 else False)
         # org_loss.reverse()
+        if compression_scheduler:
+            compression_scheduler.before_backward_pass(epoch, batch_idx, processed_batches,loss=sum(org_loss),
+                                                      optimizer=optimizer, return_loss_components=True)
         sum(org_loss).backward()
 
         nn.utils.clip_grad_norm_(model.parameters(), 10000)
@@ -249,7 +279,9 @@ def train(epoch):
 
         t8 = time.time()
         optimizer.step()
-        
+        if compression_scheduler:
+            compression_scheduler.on_minibatch_end(epoch, batch_idx, processed_batches, optimizer)
+            
         t9 = time.time()
         if False and batch_idx > 1:
             avg_time[0] = avg_time[0] + (t2-t1)
@@ -368,6 +400,19 @@ if __name__ == '__main__':
     parser.add_argument('--localmax', '-l',
         action="store_true", default=False, help='save net weights for local maximum fscore')
 
+    
+    # Distiller-related arguments
+    SUMMARY_CHOICES = ['sparsity', 'model', 'modules', 'png', 'percentile']
+    parser.add_argument('--summary', type=str, choices=SUMMARY_CHOICES,
+                        help='print a summary of the model, and exit - options: ' +
+                        ' | '.join(SUMMARY_CHOICES))
+    parser.add_argument('--compress', dest='compress', type=str, nargs='?', action='store',
+                        help='configuration file for pruning the model (default is to use hard-coded schedule)')
+    parser.add_argument('--momentum', default=0., type=float, metavar='M',
+                        help='momentum')
+    parser.add_argument('--weight-decay', '--wd', default=0., type=float,
+                        metavar='W', help='weight decay (default: 1e-4)')
+    
     FLAGS, _ = parser.parse_known_args()
     main()
 
