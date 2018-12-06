@@ -16,7 +16,7 @@ from darknet import Darknet
 import argparse
 
 script_dir = os.path.dirname(__file__)
-module_path = os.path.abspath(os.path.join(script_dir, '..'))
+module_path = os.path.abspath(os.path.join(script_dir, '..', 'distiller'))
 try:
     import distiller
 except ImportError:
@@ -112,7 +112,6 @@ def main():
     model = Darknet(cfgfile, use_cuda=use_cuda)
     if weightfile is not None:
         model.load_weights(weightfile)
-
     #model.print_network()
 
     nsamples = file_lines(trainlist)
@@ -134,9 +133,22 @@ def main():
             model = torch.nn.DataParallel(model).to(device)
         else:
             model = model.to(device)
-
+    
+    dummy_input = torch.autograd.Variable(torch.randn(1, 3, 416, 416))
+    df = model_performance_summary(model, dummy_input, 1)
+    t = tabulate(df, headers='keys', tablefmt='psql', floatfmt=".5f")
+    total_macs = df['MACs'].sum()
+    print(t)
+    print("Total MACs: " + "{:,}".format(total_macs))
+    
     params_dict = dict(model.named_parameters())
     params = []
+    conv_params = []
+    for name, param in model.named_parameters():
+        if "conv" in name and "weight" in name:
+            print(name)
+            conv_params.append(name)
+    #return
     for key, value in params_dict.items():
         if key.find('.bn') >= 0 or key.find('.bias') >= 0:
             params += [{'params': [value], 'weight_decay': 0.0}]
@@ -147,8 +159,11 @@ def main():
                         lr=learning_rate/batch_size, momentum=momentum, 
                         dampening=0, weight_decay=decay*batch_size)
     
-    if args.compress is not None:
-        pruner = distiller.pruning.SparsityLevelParameterPruner(name='sensitivity', levels=sparsity_levels)
+    if FLAGS.compress is not None:
+        pruner = distiller.pruning.L1RankedStructureParameterPruner(name='channel_pruner', 
+                                                                    group_type="Filters",
+                                                                   desired_sparsity=0,
+                                                                    weights=conv_params)
         policy = distiller.PruningPolicy(pruner, pruner_args=None)
         compression_scheduler = distiller.CompressionScheduler(model)
         compression_scheduler.add_policy(policy, starting_epoch=0, ending_epoch=args.epochs, frequency=1)
@@ -170,16 +185,18 @@ def main():
                 mfscore = 0.5
             for epoch in range(init_epoch+1, max_epochs+1):
                 
-                if args.compress is not None:
+                if FLAGS.compress is not None:
                     compression_scheduler.on_epoch_begin(epoch)
-                nsamples = train(epoch)
+                    nsamples = train(epoch,compression_scheduler)
+                else:
+                    nsamples = train(epoch)
                 if epoch % save_interval == 0:
                     savemodel(epoch, nsamples)
                 #if not no_eval and epoch >= test_interval and (epoch%test_interval) == 0:
                     #print('>> intermittent evaluating ...')
                 fscore = test(epoch)
                     #print('>> done evaluation.')
-                if args.compress is not None:
+                if FLAGS.compress is not None:
                     compression_scheduler.on_epoch_end(epoch, optimizer)
                     
                 if FLAGS.localmax and fscore > mfscore:
@@ -212,7 +229,7 @@ def curmodel():
         cur_model = model
     return cur_model
 
-def train(epoch):
+def train(epoch,compression_scheduler=None):
     global processed_batches
     t0 = time.time()
     cur_model = curmodel()
@@ -415,4 +432,3 @@ if __name__ == '__main__':
     
     FLAGS, _ = parser.parse_known_args()
     main()
-
